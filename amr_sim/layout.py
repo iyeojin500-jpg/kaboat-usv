@@ -66,6 +66,13 @@ CENTER_CROSS = (15, 10)
 VERTICAL_AISLE_X = (0, 5, 6, 11, 12, 17, 18, 23, 24, 29)
 INTERSECTIONS = frozenset((x, y) for x in VERTICAL_AISLE_X for y in (4, 9, 10, 11, 16))
 
+# 병목 구간: 중앙 교차로 부근(주 통로 x=11~18) + 입·출고 STATION 주변(맨해튼 거리 2 이내)
+BOTTLENECK_ZONE = frozenset(
+    [(x, y) for x in range(11, 19) for y in MAIN_AISLE_Y]
+    + [(x, y) for x in range(WIDTH) for y in range(HEIGHT)
+       for s in (INBOUND_STATION, OUTBOUND_STATION) if abs(x - s[0]) + abs(y - s[1]) <= 2]
+)
+
 # AMR 대기(주차) 위치: 동선과 겹치지 않는 창고 모서리
 AMR_HOMES = [(0, 19), (29, 19), (0, 0), (29, 0), (2, 19), (27, 19)]
 

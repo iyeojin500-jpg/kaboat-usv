@@ -69,3 +69,8 @@ def static_path(start: Cell, goal: Cell) -> tuple[Cell, ...]:
 
 def distance(start: Cell, goal: Cell) -> int:
     return len(static_path(start, goal))
+
+
+def distance_matrix(points: list[Cell]) -> list[list[int]]:
+    """[레이어 1] 지점 간 A* 최단거리(m) 행렬."""
+    return [[distance(a, b) for b in points] for a in points]

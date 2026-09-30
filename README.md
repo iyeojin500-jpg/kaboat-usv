@@ -1,40 +1,49 @@
-# kaboat-usv — 중소형 부품 물류창고 AMR 시뮬레이션 (CASE1 · CASE2)
+# kaboat-usv — 부품 물류창고 AMR 시뮬레이션 (v2: CASE1 vs CASE2)
 
-순수 파이썬 3.10+ (외부 라이브러리 없음).
+AMR 3대 창고에서 **CASE1 (A*만: 단순 순차 배정 + 독립 경로, 충돌 시 대기)** 과
+**CASE2 (A* 거리행렬 → OR-Tools VRP 배정 + Cooperative A*·예약테이블 경로)** 를
+창고·주문 1,000건·작업시간·RFID 결과·작업자 수가 **완전히 같은 조건**으로 돌려 비교한다.
 
 ```bash
-python3 run.py                          # 작업 1,000건 생성 → CASE1·CASE2 실행 → results/ 저장
-python3 run.py --snapshot 4300 12500    # CASE2 해당 시각(초)의 격자 화면 출력
-python3 run.py --amr 5                  # 민감도: AMR 대수 변경 (CASE1 작업자 수는 --workers)
-python3 run.py --no-spatial             # Peak 구간 C·D·H·I 집중(공간적 병목) 끄기
-python3 -m amr_sim.layout               # 격자·랙 좌표만 출력
+pip install -r requirements.txt          # ortools, pygame
+python3 run.py                           # 헤드리스: 두 CASE 실행 → results/ 에 로그·결과표
+python3 run.py --ablation                # + 레이어별 기여도 (OR-Tools만 / Cooperative A*만)
+python3 visualize.py                     # 시각화: 두 CASE 나란히 재생 (pygame 창)
+python3 visualize.py --start 4000        # 피크1 직전부터 재생
 ```
+시각화 조작: SPACE 일시정지 · ↑/↓ 배속 · → 1초 진행 · S 스크린샷 · ESC 종료.
+빨간 테두리 = 다른 AMR 때문에 대기 중, 노란 사각형 = 토트 적재, 선 = 앞으로 갈 경로, X = 목적지, 주황 음영 = 병목구간.
+
+## 레이어 구조
+```
+[레이어 1] A* (pathfinding.py, motion.py) — 지점 간 최단경로·거리/시간 행렬
+   ├─ CASE1: SimpleDispatcher (먼저 비는 AMR ← 먼저 온 주문) + IndependentPlanner (각자 A*, 막히면 정지·대기)
+   └─ CASE2: ORToolsDispatcher [레이어 2] (dispatch_ortools.py) + CooperativePlanner (reservation.py)
+```
+- **OR-Tools VRP (롤링 호라이즌)**: 배정 시점마다 대기 주문 최대 12건 × AMR 3대를 VRP 로 풀고, 지금 비어 있는
+  AMR 의 첫 주문만 확정. 목적함수 = 공차 이동시간 + Σ(대기 가중치 × 착수시각) + 혼잡 벌점
+  (다른 AMR 목적지 근처로 보내면 +10초). 가중치는 오래 기다린 주문일수록 커짐(에이징).
+- **Cooperative A* + 예약테이블**: (칸, 시각) 구간을 예약하는 시공간 A*. 휴리스틱은 회전·교차로 감속을 포함한
+  자유주행 최소시간(역방향 다익스트라). 목적지를 다른 AMR 가 작업 중이면 작업 종료 예상 시각에 맞춰 도착하도록 계획.
+  서로의 목적지를 막는 교착은 한쪽이 잠시 비켜서서 해소.
+- 두 CASE 모두 엔진(engine.py)이 칸 단독 점유를 강제 → 물리적 충돌은 0, 1000건 완주 보장.
 
 ## 산출물 (`results/`)
 | 파일 | 내용 |
 |---|---|
-| `jobs.csv` | 공통 입력 작업 1,000건 (seed=42) |
-| `case1_jobs.csv`, `case2_jobs.csv` | JOB 별 기록 (발생·배정·시작·완료시각, 대기/이동/피킹·적치/RFID·바코드/병목대기시간, 이동거리, 담당) |
-| `summary.md`, `summary.csv` | KPI 결과표 + 개선율, 자원(작업자/AMR)별 처리량 |
+| `jobs.csv` | 공통 주문 1,000건 (seed=42, 작업시간·RFID 실패 포함) |
+| `case1_A_orders.csv`, `case2_A_orders.csv` | **A. 주문별 로그** — 발생·배정·완료시각, 리드타임, 배정 AMR, 배정 당시 AMR-작업 거리 |
+| `case1_B_amr.csv`, `case2_B_amr.csv` | **B. AMR별 요약** — 이동거리·이동/작업/대기/유휴시간, 정지 횟수 |
+| `C_system_summary.csv` | **C. 시스템 요약** — makespan, 처리량, 충돌 예상/회피 정지, 병목 대기, RFID, 작업자 |
+| `summary.md` | 결과표 + 개선율 (+ 레이어별 기여도) |
 
-## 구조
-| 모듈 | 역할 |
-|---|---|
-| `amr_sim/layout.py` | 30x20 격자, 랙 A~J(장애물), 스테이션, 슬롯 접근 셀, 교차로 |
-| `amr_sim/pathfinding.py` | A* (최단거리 중 회전 최소) |
-| `amr_sim/jobs.py` | WMS 재고 모델, 작업 생성 (시간적·공간적 병목) |
-| `amr_sim/params.py` | 속도·작업시간 가정값 (실장비 선정 시 여기만 교체) |
-| `amr_sim/strategies.py` | **작업배정 / 경로계산 전략** — CASE3 는 여기 두 클래스만 교체 |
-| `amr_sim/case1.py` | 작업자 4명, 가장 먼저 비는 작업자 배정 (이벤트 기반) |
-| `amr_sim/case2.py` | AMR 3대, Δt=0.1s 시간 전진, 셀 점유·고정 우선순위 충돌 처리 |
-| `amr_sim/metrics.py` | JOB 기록, KPI |
+## 지표 정의
+- **대기시간**: 작업이 있는데 다른 AMR 때문에 멈춘 시간 (충돌 대기, 예약 대기, 재출발 지연 1초, 경로 재시도)
+- **유휴시간**: 배정된 작업 없이 서 있는 시간
+- **충돌 예상 횟수**: CASE1 = 다음 칸이 막혀 멈춘 횟수, CASE2 = 계획한 경로가 예약테이블 없이 최단경로로 갔다면 충돌했을 횟수
+- **병목구간**: 주 통로 x=11~18 (중앙 교차로 부근) + 입·출고 STATION 반경 2칸
+- **RFID**: 인식 실패율 1% 주입 → 실패 시 작업자 개입 10초 (가정값)
 
-## 모델링 가정 (설계 문서 외에 정한 것)
-- 랙 앞면은 중앙 주 통로를 향함 (A~E 는 y=11, F~J 는 y=9 에서 피킹/적치).
-- CASE1: 사람끼리는 충돌 없이 비켜 지나감. 입고 = 스캔·WMS 등록·카트 상차 → 랙 → 카트 하차·적치·WMS 갱신,
-  출고 = 피킹·카트 상차 → 출고장 → 카트 하차·바코드 확인·WMS.
-- CASE2: 회전하는 셀은 0.6 m/s, 교차로 셀 진입은 0.8 m/s. 다음 셀이 점유돼 있으면 정지(병목대기 시작),
-  재출발 시 1초 지연(병목대기에 포함). 막은 AMR 가 멈춰 있으면 2초 후 다른 AMR 셀을 피해 재계획,
-  마주 보고 10초 이상 막히면 옆 칸으로 비켜섬 (교착 방지). 작업 없는 AMR 는 창고 모서리 주차 위치로 복귀.
-- CASE2 작업자 2명은 입고장(RFID 태그 부착 5초)·출고장에 고정 → 작업자 이동시간 0.
-- 작업시간은 평균 ±30% 균등분포 (예: 피킹 7~13초). WMS·RFID 인식·재출발 지연은 고정.
+## 가정값
+`amr_sim/params.py` 한 곳에 모음 (AMR 1.5/1.2 m/s, 회전 0.6, 교차로 0.8, 피킹·적치 10초 ±30%, RFID 5/1/1초,
+작업자 2명). 1 tick = 0.1초.

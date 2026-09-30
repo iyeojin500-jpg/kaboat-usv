@@ -13,6 +13,7 @@ import random
 from collections import deque
 from dataclasses import dataclass
 
+from . import params as P
 from .layout import INBOUND_STATION, OUTBOUND_STATION, RACK_CAPACITY, RACKS, SLOT_COLS, SLOT_LEVELS
 
 N_INBOUND = 500
@@ -50,6 +51,11 @@ class Job:
     destination: str
     release: float            # 발생시각 (초)
     peak: bool
+    # 두 CASE 공통으로 쓰도록 미리 뽑아 둔 작업시간(초)·RFID 결과
+    t_first: float = 10.0     # 입고=입고장 적재, 출고=랙 피킹
+    t_second: float = 10.0    # 입고=랙 적치, 출고=출고장 하역
+    t_tag: float = 0.0        # 입고 RFID 태그 부착 (사람)
+    rfid_fail: bool = False   # RFID 자동 인식 실패 → 작업자 개입
 
     @property
     def slot_cell(self) -> tuple[int, int]:
@@ -132,6 +138,7 @@ def generate_jobs(seed: int = 42, spatial_bottleneck: bool = True) -> list[Job]:
     kinds = ["INBOUND"] * N_INBOUND + ["OUTBOUND"] * N_OUTBOUND
     rng.shuffle(kinds)
     wms = WMS(rng)
+    op_rng = random.Random(seed + 1)   # 작업시간·RFID 결과 전용 (주문 목록 자체에는 영향 없음)
     jobs: list[Job] = []
     t = 0.0
     for i, kind in enumerate(kinds, start=1):
@@ -149,14 +156,22 @@ def generate_jobs(seed: int = 42, spatial_bottleneck: bool = True) -> list[Job]:
             rack = _choose_rack(rng, cands, peak, spatial_bottleneck)
             tote, item, slot = wms.retrieve(rack)
             origin, dest = slot, "출고STATION"
-        jobs.append(Job(i, kind, tote, item, rack, slot, origin, dest, round(t, 2), peak))
+        if kind == "INBOUND":
+            t1, t2, tag = P.jitter(op_rng, P.AMR_LOAD), P.jitter(op_rng, P.AMR_PLACE), P.jitter(op_rng, P.RFID_TAG)
+        else:
+            t1, t2, tag = P.jitter(op_rng, P.AMR_PICK), P.jitter(op_rng, P.AMR_UNLOAD), 0.0
+        fail = op_rng.random() < P.RFID_FAIL_RATE
+        jobs.append(Job(i, kind, tote, item, rack, slot, origin, dest, round(t, 2), peak,
+                        round(t1, 1), round(t2, 1), round(tag, 1), fail))
     return jobs
 
 
 def save_jobs_csv(jobs: list[Job], path: str) -> None:
     with open(path, "w", newline="", encoding="utf-8-sig") as f:
         w = csv.writer(f)
-        w.writerow(["JOB_ID", "종류", "토트ID", "품목", "분류(랙)", "슬롯", "출발지", "목적지", "발생시각", "구간"])
+        w.writerow(["JOB_ID", "종류", "토트ID", "품목", "분류(랙)", "슬롯", "출발지", "목적지", "발생시각", "구간",
+                    "작업시간1", "작업시간2", "태그부착", "RFID실패"])
         for j in jobs:
             w.writerow([j.job_id, j.kind, j.tote_id, j.item, j.rack, j.slot, j.origin, j.destination,
-                        f"{j.release:.2f}", "PEAK" if j.peak else "일반"])
+                        f"{j.release:.2f}", "PEAK" if j.peak else "일반",
+                        j.t_first, j.t_second, j.t_tag, int(j.rfid_fail)])
