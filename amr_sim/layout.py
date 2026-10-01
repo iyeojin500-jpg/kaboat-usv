@@ -19,8 +19,17 @@
   y=12~15 : 상단 랙 A~E (깊이 4m)
   y=9~11  : 중앙 주 통로 3m (중앙 교차로 (15,10))
   y=5~8   : 하단 랙 F~J (깊이 4m)
-  y=0~4   : 하단 통로 5m (출고 STATION (15,1))
-  → 20m 가 짝수라 주 통로(3m) 를 y=10 중심에 두면 상/하단 통로가 4m/5m 로 1m 비대칭.
+  y=3~4   : 하단 통로 2m
+  y=0~2   : 출고 도크. 벽(y=1~2) 사이로
+              - 좁은 통로 x=15, y=2→1 (내려가는 일방통행, 한 번에 1대만) → 출고 STATION (15,0)
+              - 출구 x=12·x=18, y=0→2 (올라가는 일방통행). 출고 후 y=0 을 따라 좌/우로 빠져나감
+
+공용구역 (충돌·병목 측정 위치)
+------------------------------
+  RFID 구역   : (15,17) — 입고 STATION (15,19) 바로 아래, 모든 주문이 통과·인식(1초)
+  중앙 교차로 : 주 통로 x=11~18, y=9~11 (대표점 (15,10))
+  좁은 통로   : (15,2), (15,1) — 구역 전체를 한 번에 1대만 점유
+  출고 진입부 : 좁은 통로 입구 (14~16, 3) + 출고 STATION (15,0)
 
 랙 접근면
 ---------
@@ -58,23 +67,41 @@ _COL_OFFSET = [0, 0, 1, 2, 2, 3]          # 열 → 랙 앞면 x 오프셋
 
 # ---------------------------------------------------------------- 주요 지점
 INBOUND_STATION = (15, 19)
-OUTBOUND_STATION = (15, 1)
+OUTBOUND_STATION = (15, 0)
 CENTER_CROSS = (15, 10)
+RFID_GATE = (15, 17)
+
+# 출고 도크: 벽 + 좁은 통로(일방통행·1대) + 출구(일방통행)
+DOCK_WALLS = frozenset([(x, y) for x in range(WIDTH) for y in (1, 2) if x not in (12, 15, 18)]
+                       + [(x, 0) for x in range(WIDTH) if x < 12 or x > 18])
+NARROW_PASSAGE = frozenset([(15, 2), (15, 1)])
+NARROW_CAPACITY = 1
+# 칸에 "들어갈 때" 허용되는 이동 방향 (없는 칸은 모든 방향 허용)
+ONE_WAY: dict[tuple[int, int], frozenset] = {
+    (15, 2): frozenset({(0, -1)}), (15, 1): frozenset({(0, -1)}), (15, 0): frozenset({(0, -1)}),
+    **{(x, 0): frozenset({(-1, 0)}) for x in (12, 13, 14)},
+    **{(x, 0): frozenset({(1, 0)}) for x in (16, 17, 18)},
+    **{(x, y): frozenset({(0, 1)}) for x in (12, 18) for y in (1, 2)},
+}
+
+# 공용구역: 이름 → 칸 집합 (병목 판정에 사용)
+ZONES: dict[str, frozenset] = {
+    "RFID": frozenset([RFID_GATE]),
+    "중앙교차로": frozenset((x, y) for x in range(11, 19) for y in (9, 10, 11)),
+    "좁은통로": NARROW_PASSAGE,
+    "출고진입부": frozenset([(14, 3), (15, 3), (16, 3), OUTBOUND_STATION]),
+}
+CELL_ZONE = {c: z for z, cells in ZONES.items() for c in cells}
 
 # 세로 통로(벽 통로 포함) x 좌표. 이 x 와 가로 통로(주 통로 y=9~11, 상단 y=16, 하단 y=4)가
 # 만나는 셀을 교차로로 보고 AMR 교차로 통과 속도를 적용한다.
 VERTICAL_AISLE_X = (0, 5, 6, 11, 12, 17, 18, 23, 24, 29)
 INTERSECTIONS = frozenset((x, y) for x in VERTICAL_AISLE_X for y in (4, 9, 10, 11, 16))
 
-# 병목 구간: 중앙 교차로 부근(주 통로 x=11~18) + 입·출고 STATION 주변(맨해튼 거리 2 이내)
-BOTTLENECK_ZONE = frozenset(
-    [(x, y) for x in range(11, 19) for y in MAIN_AISLE_Y]
-    + [(x, y) for x in range(WIDTH) for y in range(HEIGHT)
-       for s in (INBOUND_STATION, OUTBOUND_STATION) if abs(x - s[0]) + abs(y - s[1]) <= 2]
-)
+BOTTLENECK_ZONE = frozenset(CELL_ZONE)
 
-# AMR 대기(주차) 위치: 동선과 겹치지 않는 창고 모서리
-AMR_HOMES = [(0, 19), (29, 19), (0, 0), (29, 0), (2, 19), (27, 19)]
+# AMR 시작(주차) 위치: 3대 서로 다른 위치
+AMR_HOMES = [(0, 19), (29, 19), (0, 3), (29, 3), (2, 19), (27, 19)]
 
 RACK_CATEGORY = {
     "A": "체결부품", "B": "베어링·회전부품", "C": "전선·케이블", "D": "커넥터·단자",
@@ -149,10 +176,19 @@ class Grid:
     def passable(self, c: tuple[int, int]) -> bool:
         return self.in_bounds(c) and c not in self.blocked
 
+    one_way: dict = field(default_factory=dict)
+
+    def can_move(self, c: tuple[int, int], n: tuple[int, int]) -> bool:
+        """c → n 이동 가능 여부 (장애물·일방통행 반영, 대각선 없음)."""
+        if not self.passable(n):
+            return False
+        allowed = self.one_way.get(n)
+        return allowed is None or (n[0] - c[0], n[1] - c[1]) in allowed
+
     def neighbors(self, c: tuple[int, int]):
         x, y = c
         for n in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
-            if self.passable(n):
+            if self.can_move(c, n):
                 yield n
 
     def free_cells(self) -> list[tuple[int, int]]:
@@ -161,9 +197,10 @@ class Grid:
 
 
 def build_grid() -> Grid:
-    g = Grid()
+    g = Grid(one_way=dict(ONE_WAY))
     for r in RACKS.values():
         g.blocked.update(r.cells)
+    g.blocked.update(DOCK_WALLS)
     return g
 
 
@@ -181,27 +218,33 @@ def validate(grid: Grid) -> list[str]:
         for col in range(1, SLOT_COLS + 1):
             if not grid.passable(r.slot_access(col)):
                 errors.append(f"랙 {r.name} 열 {col} 접근 셀이 막혀 있음")
-    for label, p in (("입고", INBOUND_STATION), ("출고", OUTBOUND_STATION), ("교차로", CENTER_CROSS)):
+    for label, p in (("입고", INBOUND_STATION), ("출고", OUTBOUND_STATION), ("교차로", CENTER_CROSS),
+                     ("RFID", RFID_GATE)):
         if not grid.passable(p):
             errors.append(f"{label} 지점 {p} 이 통행 불가")
-    # 모든 통로 셀이 하나로 연결되어 있는지 (BFS)
-    start = INBOUND_STATION
-    visited = {start}
-    q = deque([start])
-    while q:
-        for n in grid.neighbors(q.popleft()):
-            if n not in visited:
-                visited.add(n)
-                q.append(n)
+    # 모든 통로 셀이 서로 오갈 수 있는지 (일방통행 포함, 정방향·역방향 BFS)
     free = grid.free_cells()
-    if len(visited) != len(free):
-        errors.append(f"고립된 통로 셀 {len(free) - len(visited)}개")
+    for direction in ("정방향", "역방향"):
+        start = INBOUND_STATION
+        visited = {start}
+        q = deque([start])
+        while q:
+            c = q.popleft()
+            x, y = c
+            for n in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
+                ok = grid.can_move(c, n) if direction == "정방향" else (grid.passable(n) and grid.can_move(n, c))
+                if ok and n not in visited:
+                    visited.add(n)
+                    q.append(n)
+        if len(visited) != len(free):
+            errors.append(f"{direction}으로 도달 불가 통로 셀 {len(free) - len(visited)}개")
     return errors
 
 
 def render_ascii(grid: Grid) -> str:
     """격자 지도를 문자열로 (위쪽 = y 19)."""
-    marks = {INBOUND_STATION: "I", OUTBOUND_STATION: "O", CENTER_CROSS: "+"}
+    marks = {INBOUND_STATION: "I", OUTBOUND_STATION: "O", CENTER_CROSS: "+", RFID_GATE: "R"}
+    arrows = {(0, -1): "v", (0, 1): "^", (-1, 0): "<", (1, 0): ">"}
     cell_rack = {c: r.name for r in RACKS.values() for c in r.cells}
     access = {c for r in RACKS.values() for c in r.access_cells}
     lines = ["     " + "".join(f"{x // 10 if x >= 10 else ' '}" for x in range(grid.width)),
@@ -214,6 +257,10 @@ def render_ascii(grid: Grid) -> str:
                 row.append(marks[c])
             elif c in cell_rack:
                 row.append(cell_rack[c])
+            elif c in DOCK_WALLS:
+                row.append("#")
+            elif c in ONE_WAY:
+                row.append(arrows[next(iter(ONE_WAY[c]))])
             elif c in access:
                 row.append(":")
             elif y in MAIN_AISLE_Y:
@@ -227,8 +274,9 @@ def render_ascii(grid: Grid) -> str:
 def describe() -> str:
     grid = build_grid()
     out = [render_ascii(grid), "",
-           "범례: A~J 랙(장애물)  : 랙 접근 셀  = 중앙 주 통로  . 일반 통로",
-           "      I 입고 STATION  O 출고 STATION  + 중앙 교차로", "",
+           "범례: A~J 랙(장애물)  # 벽  : 랙 접근 셀  = 중앙 주 통로  . 일반 통로",
+           "      I 입고 STATION  R RFID 구역  O 출고 STATION  + 중앙 교차로",
+           "      v ^ < > 일방통행 (x=15 v v = 좁은 통로, 1대씩)", "",
            f"격자 {grid.width}x{grid.height} = {grid.width * grid.height} grid, "
            f"랙 셀 {len(grid.blocked)}, 통로 셀 {len(grid.free_cells())}", "",
            "랙 | 분류           | x 범위 | y 범위 | 접근 y | 대표 접근점 | 용량",
@@ -238,11 +286,13 @@ def describe() -> str:
                    f"{r.y_range[0]:>2}~{r.y_range[1]:<2}  |   {r.access_y:>2}   | "
                    f"{str(r.representative):<11} | {RACK_CAPACITY}")
     out += ["",
-            f"입고 STATION {INBOUND_STATION}, 출고 STATION {OUTBOUND_STATION}, 중앙 교차로 {CENTER_CROSS}",
+            f"입고 STATION {INBOUND_STATION}, RFID {RFID_GATE}, 출고 STATION {OUTBOUND_STATION}, "
+            f"중앙 교차로 {CENTER_CROSS}, 좁은 통로 {sorted(NARROW_PASSAGE)}",
+            "공용구역: " + ", ".join(f"{z} {len(c)}칸" for z, c in ZONES.items()),
             f"랙 용량 {RACK_CAPACITY} x 10 = {RACK_CAPACITY * 10} 토트, 슬롯 예: "
             f"{RACKS['A'].slot_id(2, 3)} → 접근 셀 {RACKS['A'].slot_access(2)}"]
     errors = validate(grid)
-    out.append("검증: " + ("OK (겹침 없음, 모든 통로 연결됨)" if not errors else "; ".join(errors)))
+    out.append("검증: " + ("OK (겹침 없음, 일방통행 포함 모든 통로 상호 도달 가능)" if not errors else "; ".join(errors)))
     return "\n".join(out)
 
 

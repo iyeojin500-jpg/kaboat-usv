@@ -6,8 +6,8 @@
   나머지는 다음 배정 시점에 새 정보(새 주문, AMR 위치)로 다시 푼다.
 
 비용 (단위 tick = 0.1초, 모두 [레이어 1] A* 자유주행 시간으로 계산):
-  - 호(arc) 비용 = 공차(무적재) 이동시간: 이전 주문 목적지 → 다음 주문 출발지
-  - 시간 차원    = 공차 이동 + 주문 처리시간(적재/피킹 + 적재 이동 + 적치/하역 + RFID·WMS)
+  - 호(arc) 비용 = 공차(무적재) 이동시간: AMR 위치(또는 이전 주문의 출고장) → 입고장
+  - 시간 차원    = 공차 이동 + 주문 처리시간(적재 → RFID → 저장구역 적치·피킹 → 출고장 하역, 저장구역마다 다름)
   - 목적함수     = Σ 공차 이동시간 + Σ (주문별 가중치 × 주문 착수시각)
                   가중치는 오래 기다린 주문일수록 커져서(에이징) 먼 주문이 계속 밀리는 것을 막는다.
 """
@@ -16,20 +16,14 @@ from __future__ import annotations
 from ortools.constraint_solver import pywrapcp, routing_enums_pb2
 
 from . import params as P
+from .flow import service_ticks
+from .layout import INBOUND_STATION, OUTBOUND_STATION
 from .motion import path_ticks
 
 K_CANDIDATES = 12
 CONGESTION_PENALTY = 100         # tick: 다른 AMR 가 향하는/작업 중인 칸 근처로 보내는 배정에 가산
 AGE_WEIGHT_PER_TICKS = 1200      # 120초 기다릴 때마다 착수시각 가중치 +1
 SOLVE_LIMIT_MS = 200
-
-
-def service_ticks(job) -> int:
-    t = (P.ticks(job.t_first) + path_ticks(job.pickup_cell, job.drop_cell, True) + P.ticks(job.t_second)
-         + P.ticks(P.RFID_READ) + P.ticks(P.RFID_WMS))
-    if job.kind == "OUTBOUND":
-        t += P.ticks(P.RFID_WMS)
-    return t
 
 
 class ORToolsDispatcher:
@@ -50,22 +44,22 @@ class ORToolsDispatcher:
         svc = [0] * V + [service_ticks(j) for j in cands] + [0]
 
         def loc_out(i):   # 노드를 떠날 때 위치
-            return starts[i][0] if i < V else cands[i - V].drop_cell
+            return starts[i][0] if i < V else OUTBOUND_STATION
 
         def travel(i, j):
             if i == end or j == end or j < V:
                 return 0
-            return path_ticks(loc_out(i), cands[j - V].pickup_cell, False)
+            return path_ticks(loc_out(i), INBOUND_STATION, False)
 
         size = V + N + 1
         tr = [[travel(i, j) for j in range(size)] for i in range(size)]
 
-        # 혼잡 회피: 다른 AMR 의 현재 목적지 근처(맨해튼 1칸 이내)를 출발지·목적지로 갖는 주문을
-        # 빈 AMR 의 첫 작업으로 주면 그 칸에서 대기가 생기므로 비용을 더한다.
-        hot = [a.goal for a in amrs if a.goal is not None and a.job is not None]
+        # 혼잡 회피: 다른 AMR 가 아직 저장구역 처리를 마치지 않은 같은 저장구역(랙)의 주문을
+        # 빈 AMR 의 첫 작업으로 주면 그 랙 앞에서 대기가 생기므로 비용을 더한다.
+        hot = {a.job.rack for a in amrs if a.job is not None and a.stage in ("TO_IN", "AT_IN", "TO_RFID", "AT_RFID", "TO_RACK", "AT_RACK")}
 
         def congested(job):
-            return any(abs(c[0] - h[0]) + abs(c[1] - h[1]) <= 1 for h in hot for c in (job.pickup_cell, job.drop_cell))
+            return job.rack in hot
 
         if self.congestion:
             for n, job in enumerate(cands):

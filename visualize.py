@@ -7,8 +7,10 @@
 
 조작: SPACE 일시정지 · ↑/↓ 배속 x2 / ÷2 · → 1초 진행(일시정지 중) · S 스크린샷 · ESC 종료
 
-표시: 랙(회색 블록), IN/OUT 스테이션, 주황 음영 = 병목구간, 원 = AMR (번호),
+표시: 랙(회색 블록), 벽(진회색), IN/OUT 스테이션, RFID 구역(청록), 화살표 = 일방통행(x=15 = 좁은 통로),
+      음영 = 공용구역(주황 중앙교차로 · 보라 좁은통로 · 분홍 출고진입부), 원 = AMR (번호),
       원 안 사각형 = 토트 적재, 빨간 테두리 = 다른 AMR 때문에 대기 중, 선 = 앞으로 갈 경로, X = 목적지
+하단: 경로충돌·정면충돌·병목·장시간정체(사람개입) 누적 횟수 (판정 기준 그대로 실시간 집계)
 """
 from __future__ import annotations
 
@@ -17,15 +19,18 @@ import os
 
 from amr_sim import params as P
 from amr_sim.cases import make_sim
-from amr_sim.jobs import generate_jobs
-from amr_sim.layout import BOTTLENECK_ZONE, HEIGHT, INBOUND_STATION, MAIN_AISLE_Y, OUTBOUND_STATION, RACKS, WIDTH
+from amr_sim.jobs import generate_orders
+from amr_sim.layout import (CELL_ZONE, DOCK_WALLS, HEIGHT, INBOUND_STATION, MAIN_AISLE_Y, ONE_WAY, OUTBOUND_STATION,
+                            RACKS, RFID_GATE, WIDTH)
 
 AMR_COLORS = [(220, 60, 60), (40, 110, 220), (30, 160, 80), (200, 130, 0), (150, 70, 200), (0, 150, 160)]
 BG = (245, 245, 242)
 AISLE = (232, 232, 228)
 MAIN = (220, 222, 230)
 RACK = (110, 115, 125)
-ZONE = (255, 190, 110)
+ZONE_COLORS = {"중앙교차로": (255, 190, 110), "좁은통로": (170, 120, 230), "출고진입부": (240, 140, 170),
+               "RFID": (60, 190, 190)}
+WALL = (70, 72, 80)
 TEXT = (30, 30, 35)
 SUB = (100, 100, 110)
 LABEL = {"CASE1": "CASE1  Sequential dispatch + Independent A*",
@@ -57,12 +62,25 @@ class Pane:
             for y in range(HEIGHT):
                 col = MAIN if y in MAIN_AISLE_Y else AISLE
                 rect = pg.Rect(self.x0 + x * c, self.y0 + (HEIGHT - 1 - y) * c, c, c)
+                if (x, y) in DOCK_WALLS:
+                    pg.draw.rect(scr, WALL, rect)
+                    continue
                 pg.draw.rect(scr, col, rect)
-                if (x, y) in BOTTLENECK_ZONE:
+                z = CELL_ZONE.get((x, y))
+                if z:
                     s = pg.Surface((c, c), pg.SRCALPHA)
-                    s.fill((*ZONE, 70))
+                    s.fill((*ZONE_COLORS[z], 90 if z != "RFID" else 160))
                     scr.blit(s, rect)
                 pg.draw.rect(scr, (210, 210, 205), rect, 1)
+                if (x, y) in ONE_WAY:
+                    dx, dy = next(iter(ONE_WAY[(x, y)]))
+                    cx, cy = rect.center
+                    tip = (cx + dx * c * 0.3, cy - dy * c * 0.3)
+                    base = (cx - dx * c * 0.2, cy + dy * c * 0.2)
+                    pg.draw.line(scr, SUB, base, tip, 2)
+                    px, py = -dy, -dx
+                    pg.draw.polygon(scr, SUB, [tip, (base[0] + px * c * 0.15 + dx * c * 0.25, base[1] + py * c * 0.15 - dy * c * 0.25),
+                                               (base[0] - px * c * 0.15 + dx * c * 0.25, base[1] - py * c * 0.15 - dy * c * 0.25)])
         for r in RACKS.values():
             x0, x1 = r.x_range
             y0, y1 = r.y_range
@@ -70,7 +88,8 @@ class Pane:
             pg.draw.rect(scr, RACK, rect, border_radius=3)
             t = big.render(r.name, True, (255, 255, 255))
             scr.blit(t, t.get_rect(center=rect.center))
-        for st, name, col in ((INBOUND_STATION, "IN", (40, 150, 70)), (OUTBOUND_STATION, "OUT", (130, 60, 170))):
+        for st, name, col in ((INBOUND_STATION, "IN", (40, 150, 70)), (OUTBOUND_STATION, "OUT", (130, 60, 170)),
+                              (RFID_GATE, "RFID", (20, 140, 150))):
             cx, cy = self.px(*st)
             rect = pg.Rect(0, 0, c * 1.6, c * 0.9)
             rect.center = (cx, cy)
@@ -111,11 +130,14 @@ class Pane:
         top = self.y0 + HEIGHT * c + 8
         scr.blit(mid.render(LABEL.get(sim.name, sim.name), True, TEXT), (self.x0, self.y0 - 26))
         waits = sum(a.stats.wait for a in sim.amrs) * P.TICK
-        stops = sum(a.stats.stops for a in sim.amrs)
         dist = sum(a.stats.distance for a in sim.amrs)
+        eps = sim.detector.closed + list(sim.detector.active.values())
+        cnt = {k: sum(1 for e in eps if e.kind == k) for k in ("경로충돌", "정면충돌", "병목", "장시간정체")}
         lines = [
-            f"t = {sim.now * P.TICK:8.1f}s   Done {sim.done}/{len(sim.jobs)}   Queue {len(sim.queue)}",
-            f"distance {dist:,} m   wait {waits:,.0f}s   stops {stops}   bottleneck wait {sim.zone_wait * P.TICK:,.0f}s",
+            f"t = {sim.now * P.TICK:8.1f}s   Done {sim.done}/{len(sim.jobs)}   Queue {len(sim.queue)}   "
+            f"dist {dist:,} m   wait {waits:,.0f}s",
+            f"path conflict {cnt['경로충돌']}   head-on {cnt['정면충돌']}   bottleneck {cnt['병목']}   "
+            f"human stall-intervention {cnt['장시간정체']}",
         ]
         for a in sim.amrs:
             lines.append(f"{a.status():<22} wait {a.stats.wait * P.TICK:6.0f}s  stops {a.stats.stops:4d}  jobs {a.stats.jobs}")
@@ -138,7 +160,7 @@ def main():
         os.environ["SDL_VIDEODRIVER"] = "dummy"
     import pygame as pg
 
-    jobs = generate_jobs(args.seed)
+    jobs = generate_orders(args.seed)
     sims = [make_sim(c, jobs) for c in args.case]
     start_tick = int(args.start / P.TICK)
     if start_tick:

@@ -9,7 +9,7 @@ from .reservation import CooperativePlanner
 from .strategies import IndependentPlanner, SimpleDispatcher
 
 
-def make_sim(case: str, jobs, n_amr: int = P.AMR_COUNT) -> Simulation:
+def make_sim(case: str, jobs, n_amr: int = P.AMR_COUNT, disturbances=(), seed: int = P.SEED) -> Simulation:
     """case: "CASE1" | "CASE2" | "ORTOOLS_ONLY" | "COOP_ONLY" (뒤의 둘은 레이어별 기여도 확인용)."""
     grid = build_grid()
     dispatcher, planner = {
@@ -18,4 +18,5 @@ def make_sim(case: str, jobs, n_amr: int = P.AMR_COUNT) -> Simulation:
         "ORTOOLS_ONLY": (ORToolsDispatcher, IndependentPlanner),
         "COOP_ONLY": (SimpleDispatcher, CooperativePlanner),
     }[case]
-    return Simulation(case, jobs, dispatcher(), planner(grid), n_amr=n_amr, grid=grid)
+    return Simulation(case, jobs, dispatcher(), planner(grid), n_amr=n_amr, grid=grid,
+                      disturbances=disturbances, seed=seed)

@@ -13,7 +13,7 @@ from collections import defaultdict
 from functools import lru_cache
 
 from . import params as P
-from .layout import Grid
+from .layout import NARROW_PASSAGE, Grid
 from .motion import traverse_ticks
 from .pathfinding import static_path
 
@@ -42,7 +42,7 @@ def _time_to_go(grid_id: int, goal, loaded: bool) -> dict:
         if v > H.get((c, d), INF) or d is None:
             continue
         p = (c[0] - d[0], c[1] - d[1])
-        if not grid.passable(p):
+        if not grid.passable(p) or not grid.can_move(p, c):
             continue
         for hp in DIRS + (None,):
             nv = v + traverse_ticks(p, c, hp, loaded)
@@ -56,6 +56,11 @@ def _time_to_go(grid_id: int, goal, loaded: bool) -> dict:
 _GRIDS: dict[int, Grid] = {}
 
 
+def _key(cell):
+    """좁은 통로는 구역 전체를 하나의 자원으로 예약 (한 번에 1대)."""
+    return "NARROW" if cell in NARROW_PASSAGE else cell
+
+
 class ReservationTable:
     def __init__(self):
         self.cells: dict[tuple, list[list]] = defaultdict(list)   # cell -> [[s, e, agent_idx], ...]
@@ -63,8 +68,9 @@ class ReservationTable:
 
     def reserve(self, cell, s: int, e: int, agent: int):
         entry = [s, e, agent]
-        self.cells[cell].append(entry)
-        self.owned[agent].append((cell, entry))
+        k = _key(cell)
+        self.cells[k].append(entry)
+        self.owned[agent].append((k, entry))
 
     def release_agent(self, agent: int):
         for cell, entry in self.owned.pop(agent, []):
@@ -74,16 +80,16 @@ class ReservationTable:
                 pass
 
     def is_free(self, cell, s: int, e: int, agent: int) -> bool:
-        for s2, e2, a2 in self.cells.get(cell, ()):
+        for s2, e2, a2 in self.cells.get(_key(cell), ()):
             if a2 != agent and s <= e2 and s2 <= e:
                 return False
         return True
 
     def held_forever_by_other(self, cell, agent: int) -> bool:
-        return any(e == INF and a != agent for _, e, a in self.cells.get(cell, ()))
+        return any(e == INF and a != agent for _, e, a in self.cells.get(_key(cell), ()))
 
     def forever_holders(self, cell, agent: int) -> list:
-        return [x for x in self.cells.get(cell, ()) if x[1] == INF and x[2] != agent]
+        return [x for x in self.cells.get(_key(cell), ()) if x[1] == INF and x[2] != agent]
 
     def purge(self, now: int):
         for cell, lst in self.cells.items():
