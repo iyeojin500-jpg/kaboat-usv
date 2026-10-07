@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 
 from . import params as P
 from .layout import ZONES
-from .problems import summarize, zone_breakdown
+from .problems import concurrent_waiting, summarize, zone_breakdown
 
 KINDS = ("경로충돌", "정면충돌", "병목", "장시간정체")
 
@@ -151,9 +151,13 @@ class SimResult:
             d[f"{label} 평균 지속(s)"] = s["평균(s)"]
             d[f"{label} 최대 지속(s)"] = s["최대(s)"]
             d[f"{label} 관련 주문수"] = s["관련 주문수"]
+        peak, n_amr = concurrent_waiting(self.episodes)
+        d["병목구간 최대 동시 대기 AMR 수"] = peak
+        d["병목구간 대기 경험 AMR 수"] = n_amr
         for z, s in zone_breakdown(self.episodes).items():
             d[f"병목[{z}] 횟수"] = s["횟수"]
             d[f"병목[{z}] 대기시간(s)"] = s["총시간(s)"]
+            d[f"병목[{z}] 최대 동시 대기 AMR 수"] = concurrent_waiting(self.episodes, z)[0]
         ineff = [o for o in self.orders if o.inefficient]
         d.update({
             "배차 비효율 횟수": len(ineff),

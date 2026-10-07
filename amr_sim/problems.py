@@ -113,3 +113,15 @@ def zone_breakdown(episodes: list[Episode]) -> dict:
         out[z] = {"횟수": len(eps), "총시간(s)": sum(durs), "평균(s)": sum(durs) / len(durs) if durs else 0.0,
                   "최대(s)": max(durs) if durs else 0.0}
     return out
+
+
+def concurrent_waiting(episodes: list[Episode], zone: str | None = None) -> tuple[int, int]:
+    """병목구간 대기 AMR 수: (같은 순간 최대 동시 대기 AMR 수, 병목 대기를 겪은 AMR 수).
+    zone 을 주면 그 구역만. 병목 에피소드 1개 = AMR 1대가 구역 진입을 기다린 구간."""
+    eps = [e for e in episodes if e.kind == "병목" and (zone is None or e.where == zone)]
+    events = sorted([(e.start, 1) for e in eps] + [(e.last + 1, -1) for e in eps], key=lambda x: (x[0], x[1]))
+    cur = peak = 0
+    for _, d in events:
+        cur += d
+        peak = max(peak, cur)
+    return peak, len({a for e in eps for a in e.amrs})

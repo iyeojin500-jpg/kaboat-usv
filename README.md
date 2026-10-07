@@ -7,7 +7,7 @@
 창고·주문 1,000건·작업시간·RFID 결과·작업자 수가 완전히 같은 조건(seed 42)으로 비교한다.
 
 ```bash
-pip install -r requirements.txt          # ortools, pygame
+pip install -r requirements.txt          # ortools, pygame, openpyxl
 python run.py                            # 헤드리스: Before/After 실행 → results/ 에 CSV·결과표 (약 40초)
 python run.py --seeds 1 2 3 7            # 여러 seed 반복실험 → results/seeds_summary.csv
 python run.py --ablation                 # 레이어별 기여도 (OR-Tools만 / Cooperative A*만)
@@ -43,6 +43,8 @@ python visualize.py --start 4000         # 피크1 직전부터
 | `system_summary.csv` | **시스템**: makespan, 처리량, 문제별 횟수·총/평균/최대 시간, 구역별 병목, 사람개입, RFID, 재고 정확도 |
 | `case*_events.csv` | 문제 에피소드 원본 (종류·AMR·위치·시작·종료·지속·관련 주문) — 카운트 검증용 |
 | `summary.md` | KPI 5종 Before/After/개선율/목표 판정 + 문제점 비교표 |
+| `결과정리.xlsx` | 필요 데이터 표(주문·AMR·충돌·병목·배차·시스템·RFID·작업자) CASE1/CASE2/개선율 + 원본 데이터 시트 (`python run.py` 후 `python tools/make_excel.py` 로 생성) |
+| `floorplan.png` | 창고 배치도 (`python tools/draw_floorplan.py`) |
 
 ## 구조
 | 모듈 | 역할 |
