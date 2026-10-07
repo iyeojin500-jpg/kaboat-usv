@@ -50,6 +50,7 @@ class OrderRecord:
     move: int = 0
     work: int = 0
     wait: int = 0
+    human: int = 0            # 충돌 → 작업자 해결 대기로 멈춘 tick
     tote_in: str = ""
     tote_out: str | None = ""
     slot_in: str | None = ""
@@ -87,6 +88,7 @@ class AMRStats:
     tag_wait: int = 0         # 입고장 태그 부착 대기
     idle: int = 0             # 유휴: 배정된 주문 없이 서 있는 시간
     down: int = 0             # 고장 (방해요소)
+    human: int = 0            # 충돌 → 작업자 해결 대기로 정지
     stops: int = 0
     jobs: int = 0             # 완료한 주문 수 (출고 작업 완료 기준)
     tasks_in: int = 0         # 완료한 입고 작업 수
@@ -109,6 +111,8 @@ class SimResult:
     mismatch_replans: int
     max_tasks: int
     chaining: bool
+    collisions: list
+    human_stops: bool
     rfid: dict
     rfid_interventions: int
     worker_ticks: dict
@@ -124,7 +128,21 @@ class SimResult:
         return sum(sec(getattr(o, attr)) for o in self.orders) / len(self.orders)
 
     def utilization(self, a: AMRStats) -> float:
+        """(기존 정의) 설비 가동률 = (이동 + 작업) / 전체시간."""
         return 100.0 * (a.move + a.work) / (self.makespan / P.TICK)
+
+    def work_utilization(self, a: AMRStats) -> float:
+        """실작업 가동률 = 작업시간(적재·RFID·적치·피킹·하역·WMS) / 전체시간. 빈 차 이동·대기는 가동으로 보지 않음."""
+        return 100.0 * a.work / (self.makespan / P.TICK)
+
+    @property
+    def collision_count(self) -> int:
+        return len(self.collisions)
+
+    @property
+    def human_intervention_time(self) -> float:
+        """인력 의존도 주 지표: 충돌 해결을 위해 작업자가 투입된 총 시간(초)."""
+        return sum(c["human_intervention_time"] for c in self.collisions)
 
     @property
     def stall(self) -> dict:
@@ -143,9 +161,9 @@ class SimResult:
     def kpis(self) -> dict:
         return {
             "작업 처리시간(평균, s)": self.avg("lead"),
-            "설비 가동률(%)": sum(self.utilization(a) for a in self.amrs) / len(self.amrs),
+            "설비 가동률 — 실작업(%)": sum(self.work_utilization(a) for a in self.amrs) / len(self.amrs),
             "재고 정확도(%)": self.inventory[2],
-            "사람 개입 횟수": self.human_interventions,
+            "인력 의존도 — 충돌 해결 개입시간(s)": self.human_intervention_time,
             "주문 대응시간(평균, s)": self.avg("response"),
         }
 
@@ -173,7 +191,13 @@ class SimResult:
              "총 대기시간(s)": sec(sum(a.wait for a in self.amrs)),
              "총 유휴시간(s)": sec(sum(a.idle for a in self.amrs)),
              "정지 횟수": sum(a.stops for a in self.amrs),
-             "설비 가동률(%)": self.kpis()["설비 가동률(%)"]}
+             "설비 가동률 — 실작업(%)": self.kpis()["설비 가동률 — 실작업(%)"],
+             "설비 가동률 — 기존 정의(이동+작업, %)": sum(self.utilization(a) for a in self.amrs) / len(self.amrs),
+             "충돌 건수(경로+정면)": self.collision_count,
+             "충돌 해결 작업자 개입 횟수": self.collision_count,
+             "충돌 해결 작업자 개입시간(s)": self.human_intervention_time,
+             "충돌 해결 개입 방식": "AMR 정지 후 해결" if self.human_stops else "시간 기록만",
+             "충돌 해결 대기로 AMR 정지한 시간(s)": sec(sum(a.human for a in self.amrs))}
         for kind, label in (("경로충돌", "경로 충돌"), ("정면충돌", "정면 충돌"), ("병목", "병목")):
             s = summarize(self.episodes, kind)
             d[f"{label} 횟수"] = s["횟수"]
@@ -204,7 +228,7 @@ class SimResult:
             "수동 배차 확인 개입시간(s)": self.manual_dispatch * P.DISPATCH_CHECK_SEC,
             "수동 배차 확인 관련 주문수": self.manual_dispatch,
             "수동 배차 확인 / 주문 100건": 100.0 * self.manual_dispatch / n,
-            "사람 개입 합계(정체+배차)": self.human_interventions,
+            "충돌 외 사람개입 합계(정체+배차, 참고)": self.human_interventions,
             "RFID 인식 성공": self.rfid.get("OK", 0),
             "RFID 인식 실패(감지·작업자 처리)": self.rfid.get("FAIL", 0),
             "RFID 오인식(미감지)": self.rfid.get("MISREAD", 0),
@@ -229,6 +253,10 @@ class SimResult:
             rows.append({
                 "AMR": a.name, "처리건수": a.jobs, "이동거리(m)": a.distance, "이동시간(s)": sec(a.move),
                 "작업시간(s)": sec(a.work), "대기시간(s)": sec(a.wait), "유휴시간(s)": sec(a.idle),
+                "충돌 해결 정지(s)": sec(a.human), "실작업 가동률(%)": self.work_utilization(a),
+                "충돌 관여 횟수": sum(1 for c in self.collisions if a.name in (c["amr_1"], c["amr_2"])),
+                "충돌 해결 개입시간(s)": sum(c["human_intervention_time"] for c in self.collisions
+                                          if a.name in (c["amr_1"], c["amr_2"])),
                 "태그대기(s)": sec(a.tag_wait), "고장(s)": sec(a.down), "정지 횟수": a.stops,
                 "가동률(%)": self.utilization(a), "시간당 처리(건/h)": a.jobs / (ms / 3600),
                 "입고 작업 수": a.tasks_in, "출고 작업 수": a.tasks_out, "연속 수행 작업 수": a.chained,
@@ -279,11 +307,17 @@ def save_amr_summary(res: SimResult, path: str):
 
 
 def save_system_summary(results: list[SimResult], path: str):
+    """시스템 요약 — KPI 를 다시 계산해도 같은 값이 나오도록 소수 셋째 자리까지 저장."""
     rows = [r.system_summary() for r in results]
     keys = list(rows[0].keys())
     for r in rows[1:]:
         keys += [k for k in r if k not in keys]
-    _write(path, keys, [[r.get(k) for k in keys] for r in rows])
+    with open(path, "w", newline="", encoding="utf-8-sig") as fh:
+        w = csv.writer(fh)
+        w.writerow(keys)
+        for r in rows:
+            w.writerow([f"{v:.3f}" if isinstance(r.get(k), float) else ("" if r.get(k) is None else r.get(k))
+                        for k, v in ((k, r.get(k)) for k in keys)])
 
 
 def save_events(res: SimResult, path: str):
@@ -291,3 +325,9 @@ def save_events(res: SimResult, path: str):
     rows = [[e.kind, "+".join(e.amrs), e.where, sec(e.start), sec(e.last + 1), sec(e.duration), " ".join(sorted(e.orders))]
             for e in sorted(res.episodes, key=lambda e: e.start)]
     _write(path, ["종류", "AMR", "위치/구역", "시작(s)", "종료(s)", "지속(s)", "관련 주문"], rows)
+
+
+def save_collisions(res: SimResult, path: str):
+    """충돌 이벤트별 작업자 개입 기록 (인력 의존도 근거)."""
+    keys = ["collision_id", "time", "amr_1", "amr_2", "collision_type", "location", "human_intervention_time", "orders"]
+    _write(path, keys, [[c[k] for k in keys] for c in res.collisions])

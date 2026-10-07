@@ -39,20 +39,25 @@ class Episode:
 
 
 class ProblemDetector:
-    def __init__(self):
+    def __init__(self, on_collision=None):
+        self.on_collision = on_collision          # 새 충돌 1건 발생 시 호출 (작업자 개입 처리)
         self.active: dict[tuple, Episode] = {}
         self.closed: list[Episode] = []
         self._stall_run: dict[int, int] = {}      # AMR idx → 연속 대기 tick
 
     def _touch(self, key, kind, amrs, where, now, orders):
         ep = self.active.get(key)
+        new = False
         if ep is None or ep.last < now - 1:     # 직전 tick 에 이어지지 않으면 새 에피소드
             if ep is not None:
                 self.closed.append(ep)
             ep = Episode(kind, amrs, where, now, now)
             self.active[key] = ep
+            new = True
         ep.last = now
         ep.orders.update(o for o in orders if o)
+        if new and kind in ("경로충돌", "정면충돌") and self.on_collision:
+            self.on_collision(ep)
 
     def update(self, sim):
         now = sim.now

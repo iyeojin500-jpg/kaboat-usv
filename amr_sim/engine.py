@@ -24,6 +24,7 @@ CASE2: 예약테이블에 따라 계획된 시각에 출발. 목적지가 작업
 """
 from __future__ import annotations
 
+import random
 from collections import deque
 
 from . import params as P
@@ -41,7 +42,8 @@ REPLAN_AFTER = 20        # tick (CASE1 막힘 후 재계획)
 SIDESTEP_AFTER = 100     # tick (CASE1 마주 보고 막힘 → 비켜서기)
 PLAN_RETRY = 10          # tick (CASE2 경로 없음 → 재시도)
 REDISPATCH_EVERY = 50    # tick (대기 주문 + 빈 AMR 가 있을 때 재배정 주기)
-MISMATCH_SIDESTEP = 3    # CASE2 예약 어긋남이 움직임 없이 3번 반복되면 비켜서기
+MISMATCH_SIDESTEP = 3
+RESOLVE_COOLDOWN = 100   # tick: 해결 직후 10초 안의 같은 쌍·같은 위치 충돌은 같은 상황으로 봄    # CASE2 예약 어긋남이 움직임 없이 3번 반복되면 비켜서기
 
 
 class AMR:
@@ -62,6 +64,8 @@ class AMR:
         self.retry_at = 0
         self.saved_goal = None                 # CASE2 비켜서기 중 원래 목적지
         self.mismatch_streak = 0               # CASE2 움직이지 못한 채 연속된 예약 어긋남 횟수
+        self.frozen_until = 0                  # 충돌 → 작업자 해결 중이면 이 tick 까지 정지
+        self.resolve_sidestep = False          # 정면 충돌 해결: 작업자가 이 AMR 를 옆으로 비켜 세움
         self.next_cell = None
         self.move_left = 0
         self.move_dur = 1
@@ -87,6 +91,8 @@ class AMR:
     def status(self) -> str:
         if self.category == "down":
             s = "DOWN"
+        elif self.category == "human":
+            s = "HUMAN"
         elif self.waiting or self.restart_left > 0:
             s = "WAIT"
         elif self.tasks:
@@ -118,7 +124,10 @@ class Simulation:
         self.disturbances = list(disturbances)
         for d in self.disturbances:
             d.attach(self)
-        self.detector = ProblemDetector()
+        self.detector = ProblemDetector(self.on_collision)
+        self.human_rng = random.Random(seed + 3)   # 충돌 해결시간 전용 (CASE 별로 충돌 순서대로 뽑음)
+        self.collisions: list[dict] = []
+        self.resolved: dict = {}                   # (AMR 쌍, 위치) → 같은 충돌로 보는 마지막 tick
         self.queue: list[Task] = []   # 대기 작업 (입고 작업 + 선행조건을 충족한 출고 작업)
         self.records: dict[int, OrderRecord] = {}
         self.tag_ready: dict[int, int] = {}
@@ -133,7 +142,7 @@ class Simulation:
         self.max_tasks = 0            # 최대 대기 작업 수 (입고 + 출고)
         self.mismatch_replans = 0     # CASE2: 예약 어긋남 → 재계획
         self.rfid = {"OK": 0, "FAIL": 0, "MISREAD": 0}
-        self.worker_ticks = {"태그부착": 0, "RFID 오류": 0, "수동 배차 확인": 0}
+        self.worker_ticks = {"태그부착": 0, "RFID 오류": 0, "수동 배차 확인": 0, "충돌 해결": 0}
         self.rfid_interventions = 0
 
     # ------------------------------------------------------------ 주문 발생 → 작업 생성
@@ -429,6 +438,47 @@ class Simulation:
             return self.now + rem + P.RESTART_TICKS
         return None
 
+    # ------------------------------------------------------------ 충돌 → 작업자 개입 (인력 의존도)
+    def on_collision(self, ep):
+        """경로/정면 충돌 1건 = 작업자 개입 1회. 해결시간 20~60초 랜덤 (seed 고정).
+
+        작업자가 이미 그 AMR 를 처리 중이거나(정지 중), 같은 두 AMR·같은 위치 충돌을 막 해결한 직후(10초 이내)라면
+        같은 상황이 이어지는 것으로 보고 새 충돌·개입으로 세지 않는다 (해결 중인 상황을 반복 집계하지 않음)."""
+        amrs = [a for a in self.amrs if a.name in ep.amrs]
+        key = (tuple(sorted(ep.amrs)), ep.where)
+        if any(self.now < a.frozen_until for a in amrs) or self.now < self.resolved.get(key, -1):
+            return
+        t = T(self.human_rng.uniform(P.HUMAN_RESOLVE_MIN, P.HUMAN_RESOLVE_MAX))
+        self.collisions.append({
+            "collision_id": len(self.collisions) + 1, "time": ep.start * P.TICK,
+            "amr_1": ep.amrs[0], "amr_2": ep.amrs[1] if len(ep.amrs) > 1 else "",
+            "collision_type": ep.kind, "location": ep.where,
+            "human_intervention_time": t * P.TICK, "orders": " ".join(sorted(ep.orders)),
+        })
+        self.worker_ticks["충돌 해결"] += t
+        end = self.now + 1 + t
+        self.resolved[key] = end + RESOLVE_COOLDOWN
+        if not P.HUMAN_RESOLVE_STOPS:
+            return
+        for a in amrs:                          # 1) AMR 이동 정지 2) 작업자 개입 3) 해결 4) 동시에 재개
+            a.frozen_until = end
+        if ep.kind == "정면충돌" and amrs:
+            max(amrs, key=lambda a: a.idx).resolve_sidestep = True   # 우선순위 낮은 쪽을 비켜 세움
+
+    def resolve_head_on(self, a: AMR):
+        if self.coop:
+            if a.saved_goal is None and a.goal is not None:
+                self.step_aside(a)
+            return
+        other_next = set()
+        for b in self.amrs:
+            if b is not a and b.path:
+                other_next.update(b.path[:2])
+        for n in self.grid.neighbors(a.cell):
+            if self.holder(n, a) is None and n not in other_next:
+                a.path = [n]
+                return
+
     def in_goal_cycle(self, a: AMR) -> bool:
         """a 의 목적지를 점유한 AMR → 그 AMR 의 목적지를 점유한 AMR → ... 가 a 로 돌아오면 교착."""
         cur, seen = a, set()
@@ -472,6 +522,11 @@ class Simulation:
         a.attempt = a.blocker = a.wait_target = None
         if not all(d.amr_can_move(self, a) for d in self.disturbances):
             return "down"
+        if self.now < a.frozen_until:          # 충돌 → 작업자가 해결하는 동안 정지
+            return "human"
+        if a.resolve_sidestep:                 # 해결 완료: 정면 충돌이면 이 AMR 를 옆 칸으로 비켜 세운 뒤 재개
+            a.resolve_sidestep = False
+            self.resolve_head_on(a)
         for _ in range(20):
             if a.tasks:
                 task = a.tasks[0]
@@ -534,6 +589,8 @@ class Simulation:
                     a.rec.wait += 1
                 elif cat == "work":
                     a.rec.work += 1
+                elif cat == "human":
+                    a.rec.human += 1
         self.detector.update(self)
         self.now += 1
         if self.coop and self.now % 600 == 0:
@@ -586,6 +643,7 @@ class Simulation:
             avoided_conflicts=getattr(self.planner, "predicted_conflicts", 0),
             mismatch_replans=self.mismatch_replans,
             max_tasks=self.max_tasks, chaining=self.chaining,
+            collisions=list(self.collisions), human_stops=P.HUMAN_RESOLVE_STOPS,
             rfid=dict(self.rfid), rfid_interventions=self.rfid_interventions,
             worker_ticks=dict(self.worker_ticks),
             inventory=self.inventory.accuracy(),

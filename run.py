@@ -17,16 +17,30 @@ from amr_sim import params as P
 from amr_sim.cases import make_sim
 from amr_sim.jobs import generate_orders, save_orders_csv
 from amr_sim.layout import ZONES, describe
-from amr_sim.metrics import SimResult, save_amr_summary, save_events, save_order_log, save_system_summary
+from amr_sim.metrics import (SimResult, save_amr_summary, save_collisions, save_events, save_order_log,
+                             save_system_summary)
 
-# (KPI, 계산식, 방향(+1 높을수록 좋음 / -1 낮을수록 좋음), 목표 판정)
+# (KPI, 계산식, 방향(+1 높을수록 좋음 / -1 낮을수록 좋음), 목표 문구, 목표 하한, 목표 상한(초과 달성 기준, 없으면 None))
 KPI_SPEC = [
-    ("작업 처리시간(평균, s)", "출고완료 − 주문발생", -1, "개선율 ≥ 20% (목표 20~30%↓)", lambda imp, a: imp >= 20),
-    ("설비 가동률(%)", "(이동+작업)/전체시간×100", +1, "개선율 ≥ 15%↑", lambda imp, a: imp >= 15),
-    ("재고 정확도(%)", "일치 기록/전체 기록×100", +1, "After ≥ 98%", lambda imp, a: a >= 98),
-    ("사람 개입 횟수", "장시간정체 + 수동배차 개입", -1, "개선율 ≥ 10% (목표 10~15%↓)", lambda imp, a: imp >= 10),
-    ("주문 대응시간(평균, s)", "작업시작 − 주문발생", -1, "개선율 ≥ 25%↑", lambda imp, a: imp >= 25),
+    ("작업 처리시간(평균, s)", "출고완료 − 주문발생", -1, "20~30% 단축", 20, 30),
+    ("설비 가동률 — 실작업(%)", "작업시간 / 전체시간 × 100 (상대 개선율)", +1, "15% 이상 향상", 15, None),
+    ("재고 정확도(%)", "일치 기록 / 전체 기록 × 100", +1, "98% 이상 (방해요소 반영 후 평가)", None, None),
+    ("인력 의존도 — 충돌 해결 개입시간(s)", "(B 개입시간 − A 개입시간) / B 개입시간 × 100", -1, "10~15% 감소", 10, 15),
+    ("주문 대응시간(평균, s)", "작업시작 − 주문발생", -1, "25% 이상 개선", 25, None),
 ]
+
+
+def judge(name, imp, after, low, high):
+    if name.startswith("재고"):
+        return "달성" if after >= 98 else "미달"
+    if imp is None:
+        return "-"
+    if imp < low:
+        return "미달"
+    if high is not None and imp > high:
+        return "초과 달성"
+    return "달성"
+
 
 # 문제점 비교 (시스템 요약 키, 낮을수록 좋음 여부)
 PROBLEM_ROWS = [
@@ -39,7 +53,9 @@ PROBLEM_ROWS = [
     ("배차 비효율 횟수", True), ("배차 추가 이동거리(m)", True), ("배차 추가 예상시간(s)", True),
     ("장시간 정체 개입 횟수", True), ("장시간 정체 개입시간(s)", True), ("장시간 정체 관련 주문수", True),
     ("수동 배차 확인 개입 횟수", True), ("수동 배차 확인 / 주문 100건", True),
-    ("사람 개입 합계(정체+배차)", True), ("최대 대기 주문 수", True), ("최대 대기 작업 수", True),
+    ("충돌 건수(경로+정면)", True), ("충돌 해결 작업자 개입시간(s)", True), ("충돌 해결 대기로 AMR 정지한 시간(s)", True),
+    ("설비 가동률 — 기존 정의(이동+작업, %)", False),
+    ("충돌 외 사람개입 합계(정체+배차, 참고)", True), ("최대 대기 주문 수", True), ("최대 대기 작업 수", True),
     ("연속 수행 작업 수", False), ("작업장 복귀 횟수", True), ("같은 AMR 가 입고→출고 연속 수행한 주문 수", False),
     ("AMR별 작업 수 최대-최소 차", True),
 ]
@@ -69,11 +85,10 @@ def md_table(header, rows):
 def kpi_rows(b: SimResult, a: SimResult):
     kb, ka = b.kpis(), a.kpis()
     rows = []
-    for name, formula, direction, goal, ok in KPI_SPEC:
+    for name, formula, direction, goal, low, high in KPI_SPEC:
         imp = improvement(kb[name], ka[name], direction)
         rows.append([name, formula, fmt(kb[name]), fmt(ka[name]),
-                     "-" if imp is None else f"{imp:+.1f}%", goal,
-                     "-" if imp is None and name != "재고 정확도(%)" else ("달성" if ok(imp or 0, ka[name]) else "미달")])
+                     "-" if imp is None else f"{imp:+.1f}%", goal, judge(name, imp, ka[name], low, high)])
     return rows
 
 
@@ -137,7 +152,9 @@ def main():
         save_order_log(res, os.path.join(args.out, f"{c.lower()}_orders.csv"))
         save_amr_summary(res, os.path.join(args.out, f"{c.lower()}_amr.csv"))
         save_events(res, os.path.join(args.out, f"{c.lower()}_events.csv"))
+        save_collisions(res, os.path.join(args.out, f"{c.lower()}_collisions.csv"))
     save_system_summary(list(results.values()), os.path.join(args.out, "system_summary.csv"))
+    save_comparison(results["CASE1"], results["CASE2"], os.path.join(args.out, "simulation_comparison.csv"))
 
     b, a = results["CASE1"], results["CASE2"]
     lines = [
@@ -167,6 +184,32 @@ def main():
           f"· case*_events.csv(문제 에피소드) · summary.md")
 
 
+def save_comparison(b: SimResult, a: SimResult, path: str):
+    """Baseline(CASE1) vs Optimized(CASE2) 비교 — 인력 의존도·KPI 핵심 값."""
+    kb, ka = b.kpis(), a.kpis()
+    lab = "인력 의존도 — 충돌 해결 개입시간(s)"
+    row = {
+        "baseline_collision_count": b.collision_count,
+        "optimized_collision_count": a.collision_count,
+        "baseline_human_intervention_count": b.collision_count,
+        "optimized_human_intervention_count": a.collision_count,
+        "baseline_human_intervention_time": round(b.human_intervention_time, 1),
+        "optimized_human_intervention_time": round(a.human_intervention_time, 1),
+        "labor_dependency_reduction": round(improvement(kb[lab], ka[lab], -1) or 0.0, 2),
+        "labor_dependency_reduction_by_count": round(improvement(b.collision_count, a.collision_count, -1) or 0.0, 2),
+    }
+    for name, _, direction, _, low, high in KPI_SPEC:
+        imp = improvement(kb[name], ka[name], direction)
+        row[f"{name} baseline"] = round(kb[name], 2)
+        row[f"{name} optimized"] = round(ka[name], 2)
+        row[f"{name} 개선율(%)"] = None if imp is None else round(imp, 2)
+        row[f"{name} 판정"] = judge(name, imp, ka[name], low, high)
+    with open(path, "w", newline="", encoding="utf-8-sig") as f:
+        w = csv.DictWriter(f, fieldnames=list(row))
+        w.writeheader()
+        w.writerow(row)
+
+
 def run_seeds(args):
     rows, table = [], []
     for seed in args.seeds:
@@ -176,12 +219,12 @@ def run_seeds(args):
         a, _ = run_case("CASE2", orders, args.amr, seed)
         kb, ka = b.kpis(), a.kpis()
         row = {"seed": seed}
-        for name, _, direction, _, _ in KPI_SPEC:
+        for name, _, direction, _, _, _ in KPI_SPEC:
             row[f"{name} Before"] = kb[name]
             row[f"{name} After"] = ka[name]
             imp = improvement(kb[name], ka[name], direction)
             row[f"{name} 개선율(%)"] = imp
-        for key in ("완료시간(makespan,s)", "경로 충돌 횟수", "정면 충돌 횟수", "병목 횟수", "배차 비효율 횟수"):
+        for key in ("완료시간(makespan,s)", "충돌 건수(경로+정면)", "병목 횟수", "배차 비효율 횟수"):
             row[f"{key} Before"] = b.system_summary()[key]
             row[f"{key} After"] = a.system_summary()[key]
         rows.append(row)

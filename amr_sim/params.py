@@ -35,6 +35,11 @@ RFID_FAIL_RATE = 0.01      # 인식 실패(읽기 안 됨, 감지됨) → 작업
 RFID_MISREAD_RATE = 0.005  # 오인식(다른 ID 로 읽힘, 감지 안 됨) → WMS 기록 불일치 (재고 정확도에 반영)
 WORKER_INTERVENTION = 10.0 # 인식 실패 시 작업자 수동 확인·재부착 (가정값)
 
+# ---- 인력 의존도: AMR 충돌 발생 시 작업자가 현장에서 해결 (실제 회사 데이터가 있으면 교체)
+HUMAN_RESOLVE_MIN = 20.0         # 충돌 1건 작업자 해결시간 최소 (초)
+HUMAN_RESOLVE_MAX = 60.0         # 최대 (초) — 범위 안에서 균등 랜덤, seed 고정
+HUMAN_RESOLVE_STOPS = True       # True: 해결될 때까지 관련 AMR 정지 (정지→개입→해결→재개) / False: 시간만 기록
+
 # ---- 문제·사람개입 판정 기준 (실제 업체 운영기준 확보 시 이 값만 교체)
 STALL_INTERVENTION_SEC = 5.0     # 충돌·병목으로 연속 5초 이상 못 움직이면 장시간 정체 개입 1회
 DISPATCH_CHECK_RATIO = 0.20      # 배정 AMR 예상비용이 최소 가능 비용보다 20% 이상 크면 수동 배차 확인 개입

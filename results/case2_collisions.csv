@@ -1,0 +1,3 @@
+﻿collision_id,time,amr_1,amr_2,collision_type,location,human_intervention_time,orders
+1,12597.9,AMR1,AMR3,경로충돌,"(15, 19)",30.9,O0344 O0347
+2,17333.0,AMR2,AMR3,경로충돌,"(15, 19)",39.5,O0469 O0478
