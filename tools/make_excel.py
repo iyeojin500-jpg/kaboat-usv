@@ -163,14 +163,19 @@ def build(results: str, out: str):
           ("병목", "  └ 병목 발생 횟수 (참고)", "회", lambda c: SYS("병목 횟수", c), -1, "시스템요약 · 병목 횟수",
            "대기 시작~진입까지 1회", N)]
     for amr in ("AMR1", "AMR2", "AMR3"):
-        R.append(("배차", f"주문→AMR 배정 결과 — {amr}", "건",
-                  (lambda c, a=amr: f'COUNTIF({ocol("배정 AMR", c)},"{a}")'), 0,
-                  "주문별_CASE* · 배정 AMR", "주문별 배정 AMR 은 주문별 시트" if amr == "AMR1" else "", N))
-    dkey = "배정 당시 AMR-입고장 거리(m)"
-    R += [("배차", "배정 당시 AMR-작업 위치 거리 (평균)", "m", lambda c: f'AVERAGE({ocol(dkey, c)})', -1,
-           "주문별_CASE* · 배정 당시 AMR-입고장 거리(m)", "작업 위치 = 입고장 (모든 주문의 시작점)", T),
-          ("배차", "배정 당시 AMR-작업 위치 거리 (최대)", "m", lambda c: f'MAX({ocol(dkey, c)})', -1,
-           "주문별_CASE* · 배정 당시 AMR-입고장 거리(m)", "", N),
+        R.append(("배차", f"작업→AMR 배정 결과 — {amr}", "건",
+                  (lambda c, a=amr: f'COUNTIF({ocol("입고 배정 AMR", c)},"{a}")+COUNTIF({ocol("출고 배정 AMR", c)},"{a}")'), 0,
+                  "주문별_CASE* · 입고/출고 배정 AMR", "입고 작업 + 출고 작업 (주문별 배정은 주문별 시트)" if amr == "AMR1" else "", N))
+    dkey, pkey = "배정 당시 AMR-입고장 거리(m)", "배정 당시 AMR-피킹위치 거리(m)"
+    R += [("배차", "배정 당시 AMR-작업 위치 거리 (입고, 평균)", "m", lambda c: f'AVERAGE({ocol(dkey, c)})', 0,
+           "주문별_CASE* · 배정 당시 AMR-입고장 거리(m)",
+           "입고 작업 위치 = 입고장. CASE1 은 배정 전에 이미 입고장으로 복귀해 있어 ≈0m (복귀 이동은 이동거리에 포함) → 개선율 비교 안 함", T),
+          ("배차", "배정 당시 AMR-작업 위치 거리 (출고, 평균)", "m", lambda c: f'AVERAGE({ocol(pkey, c)})', 0,
+           "주문별_CASE* · 배정 당시 AMR-피킹위치 거리(m)", "출고 작업 위치 = 피킹할 저장구역 (CASE2 는 직전 작업 위치에서 바로 이어받으면 0m)", T),
+          ("배차", "  └ 연속 수행 작업 수", "건", lambda c: SYS("연속 수행 작업 수", c), 0,
+           "시스템요약 · 연속 수행 작업 수", "작업장 복귀 없이 직전 작업 위치에서 바로 시작한 작업", N),
+          ("배차", "  └ 작업장(입고장) 복귀 횟수", "회", lambda c: SYS("작업장 복귀 횟수", c), -1,
+           "시스템요약 · 작업장 복귀 횟수", "CASE1 은 작업마다 필수, CASE2 는 선택", N),
           ("시스템", "전체 작업 완료시간", "sec", lambda c: SYS("완료시간(makespan,s)", c), -1, "시스템요약 · 완료시간(makespan,s)",
            "마지막 주문 출고 완료 시각", T),
           ("시스템", "시간당 처리 주문량", "건/h", lambda c: SYS("시간당 처리량(건/h)", c), +1, "시스템요약 · 시간당 처리량(건/h)", "", T),
@@ -195,8 +200,8 @@ def build(results: str, out: str):
     ws = main
     ws["A1"] = "AMR 창고 시뮬레이션 — 필요 데이터 결과 정리 (Before CASE1 vs After CASE2)"
     ws["A1"].font = f(True, size=14)
-    ws["A2"] = ("CASE1: 단순 순차 배정 + 독립 A*  ·  CASE2: OR-Tools VRP 배정 + Cooperative A* + 예약테이블  ·  "
-                "AMR 3대, 주문 1,000건, seed 42 (두 CASE 동일 주문)")
+    ws["A2"] = ("CASE1: 단순 순차 배정 + 독립 A* + 작업마다 작업장 복귀  ·  CASE2: OR-Tools 후속 작업 선택(연속 수행) + "
+                "Cooperative A* + 예약테이블  ·  AMR 3대, 주문 1,000건(입고·출고 작업 2,000건), seed 42 (두 CASE 동일 주문)")
     ws["A2"].font = f(color="555555", size=9)
     hdr = ["구분", "필요한 데이터", "단위", "CASE1 (Before)", "CASE2 (After)", "개선율", "출처 (시트 · 열)", "비고"]
     HR = 4

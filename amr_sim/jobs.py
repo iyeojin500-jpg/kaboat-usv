@@ -1,7 +1,9 @@
-"""주문 1,000건 생성 + WMS/실물 재고 모델.
+"""주문 1,000건 생성 + 작업(Task) 분리 + WMS/실물 재고 모델.
 
-주문 1건 = 입고장에서 토트 적재 → RFID 구역 인식 → 저장구역(A~J) 에서 입고 토트 적치 + 출고 토트 피킹
-          → 중앙 교차로 → 좁은 통로 → 출고장 하역 (O0001 ~ O1000)
+주문 1건 (O0001 ~ O1000) = 작업 2개
+  입고 작업 (IN)  : 입고장 적재 → RFID 구역 인식 → 저장구역(A~J) 빈 슬롯에 적치
+  출고 작업 (OUT) : 저장구역에서 실제 화물(FIFO) 피킹 → 중앙 교차로 → 좁은 통로 → 출고장 하역
+  선행조건: 같은 주문의 입고 작업이 끝나야 출고 작업을 시작할 수 있다. 주문 완료 = 출고 작업 완료.
 
 - 발생 간격: 1~200 일반(15~25s), 201~400 피크(3~7s), 401~600 일반, 601~800 피크, 801~1000 일반
 - 저장구역 A~J 랜덤 (피크 구간은 약 60% 를 C·D·H·I 에 집중 — 공간적 병목)
@@ -99,6 +101,53 @@ def generate_orders(seed: int = P.SEED, spatial_bottleneck: bool = True, gap_sca
 generate_jobs = generate_orders   # 이전 이름 호환
 
 
+class Task:
+    """AMR 1대가 한 번에 수행하는 작업 단위. kind = "IN"(입고) / "OUT"(출고)."""
+
+    __slots__ = ("order", "kind", "ready", "amr")
+
+    def __init__(self, order: Order, kind: str, ready: int):
+        self.order = order
+        self.kind = kind
+        self.ready = ready          # 작업 가능해진 tick (입고=주문 발생, 출고=입고 완료)
+        self.amr = ""
+
+    @property
+    def order_id(self) -> str:
+        return self.order.order_id
+
+    @property
+    def job_id(self) -> int:
+        return self.order.job_id
+
+    @property
+    def rack(self) -> str:
+        return self.order.rack
+
+    @property
+    def release(self) -> float:
+        return self.order.release
+
+    @property
+    def label(self) -> str:
+        return f"{self.order_id}-{'입고' if self.kind == 'IN' else '출고'}"
+
+    @property
+    def priority(self):
+        """우선순위: 먼저 발생한 주문 먼저, 같은 주문이면 입고 → 출고."""
+        return (self.order.release, self.order.job_id, self.kind == "OUT")
+
+    @property
+    def start_cell(self):
+        from .layout import INBOUND_STATION
+        return INBOUND_STATION if self.kind == "IN" else self.order.rack_cell
+
+    @property
+    def end_cell(self):
+        from .layout import OUTBOUND_STATION
+        return self.order.rack_cell if self.kind == "IN" else OUTBOUND_STATION
+
+
 class Inventory:
     """실물 재고와 WMS 기록을 따로 들고 있다가 재고 정확도를 계산한다.
 
@@ -134,32 +183,52 @@ class Inventory:
     def has_stock(self, rack: str) -> bool:
         return bool(self.fifo[rack])
 
-    def choose_slots(self, rack: str) -> tuple[str | None, str | None]:
-        """(적치할 빈 슬롯, 피킹할 슬롯). 재고 가정상 피킹 슬롯은 항상 있음."""
-        free = [s for s, v in self.actual[rack].items() if v is None and s not in self.reserved]
-        place = free[0] if free else None
-        pick = next((s for s in self.fifo[rack] if s not in self.reserved), None)
-        self.reserved.update(x for x in (place, pick) if x)
-        return place, pick
+    def can_place(self, rack: str) -> bool:
+        """입고 가능: 예약되지 않은 실제 빈 슬롯이 있는가."""
+        return any(v is None and s not in self.reserved for s, v in self.actual[rack].items())
 
-    def process(self, order: Order, place: str | None, pick: str | None) -> tuple[str, str | None]:
-        """랙에서 적치+피킹 실행. (입고 토트 ID, 출고 토트 ID) 반환."""
-        rack = order.rack
-        self.reserved.difference_update((place, pick))
+    def can_pick(self, rack: str) -> bool:
+        """출고 가능: 예약되지 않은 실제 화물이 있는가."""
+        return any(s not in self.reserved for s in self.fifo[rack])
+
+    def choose_place(self, rack: str) -> str | None:
+        """입고 위치 선정 규칙: 랙 안의 빈 슬롯 중 슬롯 번호 순 첫 번째 (예약)."""
+        free = [s for s, v in self.actual[rack].items() if v is None and s not in self.reserved]
+        if free:
+            self.reserved.add(free[0])
+            return free[0]
+        return None
+
+    def choose_pick(self, rack: str) -> str | None:
+        """출고 위치 선정 규칙: 가장 오래 보관된 화물(FIFO) (예약)."""
+        pick = next((s for s in self.fifo[rack] if s not in self.reserved), None)
+        if pick:
+            self.reserved.add(pick)
+        return pick
+
+    def store(self, order: Order, place: str | None) -> str:
+        """입고 작업: 입고 토트를 빈 슬롯에 적치. RFID 오인식이면 WMS 에 다른 ID 로 기록."""
         tote_in = self.new_tote()
-        tote_out = None
-        if pick is not None:
-            tote_out = self.actual[rack][pick]
-            self.actual[rack][pick] = None
-            self.wms[rack][pick] = None
-            self.fifo[rack].remove(pick)
         if place is not None:
+            self.reserved.discard(place)
+            rack = order.rack
             self.actual[rack][place] = tote_in
             self.wms[rack][place] = tote_in if order.rfid != RFID_MISREAD else f"{tote_in}?"
             self.fifo[rack].append(place)
             self.records_total += 1
             self.records_match += order.rfid != RFID_MISREAD
-        return tote_in, tote_out
+        return tote_in
+
+    def retrieve(self, rack: str, pick: str | None) -> str | None:
+        """출고 작업: 화물 피킹."""
+        if pick is None:
+            return None
+        self.reserved.discard(pick)
+        tote_out = self.actual[rack][pick]
+        self.actual[rack][pick] = None
+        self.wms[rack][pick] = None
+        self.fifo[rack].remove(pick)
+        return tote_out
 
     def accuracy(self) -> tuple[int, int, float]:
         """누적 재고 정확도 (일치 기록 수, 전체 기록 수, %) — 초기 재고 + 실행 중 적치된 모든 토트 기록 중

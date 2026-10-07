@@ -39,7 +39,9 @@ PROBLEM_ROWS = [
     ("배차 비효율 횟수", True), ("배차 추가 이동거리(m)", True), ("배차 추가 예상시간(s)", True),
     ("장시간 정체 개입 횟수", True), ("장시간 정체 개입시간(s)", True), ("장시간 정체 관련 주문수", True),
     ("수동 배차 확인 개입 횟수", True), ("수동 배차 확인 / 주문 100건", True),
-    ("사람 개입 합계(정체+배차)", True), ("최대 대기 주문 수", True),
+    ("사람 개입 합계(정체+배차)", True), ("최대 대기 주문 수", True), ("최대 대기 작업 수", True),
+    ("연속 수행 작업 수", False), ("작업장 복귀 횟수", True), ("같은 AMR 가 입고→출고 연속 수행한 주문 수", False),
+    ("AMR별 작업 수 최대-최소 차", True),
 ]
 
 
@@ -140,8 +142,9 @@ def main():
     b, a = results["CASE1"], results["CASE2"]
     lines = [
         "# Before(CASE1) vs After(CASE2) 결과", "",
-        f"- Before CASE1: {b.dispatcher} + {b.planner}",
-        f"- After  CASE2: {a.dispatcher} + {a.planner}",
+        f"- Before CASE1: {b.dispatcher} + {b.planner} + 작업 완료 후 작업장(입고장) 복귀",
+        f"- After  CASE2: {a.dispatcher} 후속 작업 선택 + {a.planner} + 작업 완료 위치에서 연속 수행 (복귀는 선택)",
+        "- 주문 1건 = 입고 작업(입고장→RFID→저장구역 적치) + 출고 작업(저장구역 피킹→출고장), 출고는 입고 완료 후",
         f"- 공통: AMR {args.amr}대, 주문 {len(orders)}건, seed={args.seed}, 발생간격 배율 {args.gap_scale:g} "
         f"(동일 주문·작업시간·RFID 결과)",
         f"- 부하: 주문 발생 {len(orders) / (orders[-1].release / 3600):.0f}건/h vs Before 처리능력 "

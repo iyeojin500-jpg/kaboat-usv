@@ -24,16 +24,24 @@ class OrderRecord:
     order_id: str
     rack: str
     release: int
-    assign: int = 0           # = 작업시작 (AMR 가 이 주문을 위해 움직이기 시작)
+    assign: int = 0           # = 작업시작 (입고 작업 배정 — AMR 가 이 주문을 위해 움직이기 시작)
     t_in: int = 0             # 입고장 도착
     t_rfid: int = 0           # RFID 통과 완료
-    t_rack: int = 0           # 저장구역 처리 완료
-    complete: int = 0         # 출고 완료
-    amr: str = ""
-    cost: int = 0             # 배차 시 배정 AMR 의 예상 수행비용 (tick)
+    t_rack: int = 0           # 저장구역 적치 완료 (= 입고 작업 완료)
+    out_assign: int = 0       # 출고 작업 배정
+    t_pick: int = 0           # 피킹 완료
+    complete: int = 0         # 출고 완료 (= 주문 완료)
+    amr: str = ""             # 입고 작업 AMR
+    amr_out: str = ""         # 출고 작업 AMR
+    cost: int = 0             # 입고 작업 배차 시 배정 AMR 의 예상 수행비용 (tick)
     min_cost: int = 0         # 그 시점 선택 가능 AMR 중 최소 예상 수행비용
     best_amr: str = ""
-    assign_dist: int = 0      # 배정 시 AMR → 입고장 거리(m)
+    assign_dist: int = 0      # 입고 배정 시 AMR → 입고장 거리(m)
+    cost_out: int = 0
+    min_cost_out: int = 0
+    best_amr_out: str = ""
+    assign_dist_out: int = 0  # 출고 배정 시 AMR → 피킹 위치 거리(m)
+    chained_out: bool = False # 출고 작업을 작업장 복귀 없이 직전 작업 위치에서 바로 시작
     inefficient: bool = False
     extra_time: int = 0
     extra_dist: int = 0
@@ -48,6 +56,13 @@ class OrderRecord:
     slot_out: str | None = ""
     problems: dict = field(default_factory=dict)
     problem_ticks: dict = field(default_factory=dict)
+
+    def set_assign(self, kind, now, amr, dist, cost, min_cost, best, chained):
+        if kind == "IN":
+            self.assign, self.amr, self.assign_dist, self.cost, self.min_cost, self.best_amr = now, amr, dist, cost, min_cost, best
+        else:
+            self.out_assign, self.amr_out, self.assign_dist_out = now, amr, dist
+            self.cost_out, self.min_cost_out, self.best_amr_out, self.chained_out = cost, min_cost, best, chained
 
     @property
     def lead(self) -> int:          # 총 처리시간 = 출고완료 − 주문발생
@@ -73,7 +88,11 @@ class AMRStats:
     idle: int = 0             # 유휴: 배정된 주문 없이 서 있는 시간
     down: int = 0             # 고장 (방해요소)
     stops: int = 0
-    jobs: int = 0
+    jobs: int = 0             # 완료한 주문 수 (출고 작업 완료 기준)
+    tasks_in: int = 0         # 완료한 입고 작업 수
+    tasks_out: int = 0        # 완료한 출고 작업 수
+    chained: int = 0          # 작업장 복귀 없이 바로 이어서 시작한 작업 수
+    returns: int = 0          # 작업장(입고장) 복귀 횟수 (CASE1)
 
 
 @dataclass
@@ -88,6 +107,8 @@ class SimResult:
     episodes: list
     avoided_conflicts: int
     mismatch_replans: int
+    max_tasks: int
+    chaining: bool
     rfid: dict
     rfid_interventions: int
     worker_ticks: dict
@@ -137,6 +158,15 @@ class SimResult:
              "평균 총처리시간(s)": self.avg("lead"), "평균 주문 대응시간(s)": self.avg("response"),
              "평균 실행시간(s)": self.avg("execution"),
              "최대 대기 주문 수": self.max_queue,
+             "최대 대기 작업 수": self.max_tasks,
+             "작업 완료 후 정책": "후속 작업 연속 수행" if self.chaining else "작업장(입고장) 복귀",
+             "완료 작업 수(입고+출고)": sum(a.tasks_in + a.tasks_out for a in self.amrs),
+             "연속 수행 작업 수": sum(a.chained for a in self.amrs),
+             "연속 수행 비율(%)": 100.0 * sum(a.chained for a in self.amrs) / max(1, sum(a.tasks_in + a.tasks_out for a in self.amrs)),
+             "작업장 복귀 횟수": sum(a.returns for a in self.amrs),
+             "같은 AMR 가 입고→출고 연속 수행한 주문 수": sum(o.chained_out and o.amr == o.amr_out for o in self.orders),
+             "AMR별 작업 수 최대-최소 차": (max(a.tasks_in + a.tasks_out for a in self.amrs)
+                                         - min(a.tasks_in + a.tasks_out for a in self.amrs)),
              "총 이동거리(m)": sum(a.distance for a in self.amrs),
              "총 이동시간(s)": sec(sum(a.move for a in self.amrs)),
              "총 작업시간(s)": sec(sum(a.work for a in self.amrs)),
@@ -201,6 +231,8 @@ class SimResult:
                 "작업시간(s)": sec(a.work), "대기시간(s)": sec(a.wait), "유휴시간(s)": sec(a.idle),
                 "태그대기(s)": sec(a.tag_wait), "고장(s)": sec(a.down), "정지 횟수": a.stops,
                 "가동률(%)": self.utilization(a), "시간당 처리(건/h)": a.jobs / (ms / 3600),
+                "입고 작업 수": a.tasks_in, "출고 작업 수": a.tasks_out, "연속 수행 작업 수": a.chained,
+                "작업장 복귀 횟수": a.returns,
                 "경로충돌 관여": involved["경로충돌"], "정면충돌 관여": involved["정면충돌"],
                 "병목 횟수": involved["병목"], "장시간정체 개입": involved["장시간정체"],
             })
@@ -221,8 +253,9 @@ def _write(path, header, rows):
 
 def save_order_log(res: SimResult, path: str):
     header = ["주문ID", "저장구역", "발생시각(s)", "작업시작(배정)시각(s)", "입고장 도착(s)", "RFID 통과(s)",
-              "저장구역 처리완료(s)", "출고완료(s)", "총처리시간(s)", "주문 대응시간(s)", "배정 AMR",
-              "배정 당시 AMR-입고장 거리(m)", "실제 배차비용(s)", "최소 가능비용(s)", "최소비용 AMR",
+              "저장구역 적치완료(s)", "출고 작업 배정(s)", "피킹 완료(s)", "출고완료(s)", "총처리시간(s)", "주문 대응시간(s)",
+              "입고 배정 AMR", "출고 배정 AMR", "출고 연속 수행", "배정 당시 AMR-입고장 거리(m)", "배정 당시 AMR-피킹위치 거리(m)",
+              "입고 배차비용(s)", "입고 최소 가능비용(s)", "입고 최소비용 AMR", "출고 배차비용(s)", "출고 최소 가능비용(s)", "출고 최소비용 AMR",
               "배차 비효율", "추가 이동거리(m)", "추가 예상시간(s)", "수동 배차 확인 개입",
               "경로충돌", "정면충돌", "병목 횟수", "병목 대기(s)", "장시간정체 개입", "장시간정체 개입시간(s)",
               "이동거리(m)", "이동시간(s)", "작업시간(s)", "대기시간(s)", "입고 토트", "적치 슬롯", "출고 토트", "피킹 슬롯"]
@@ -230,8 +263,10 @@ def save_order_log(res: SimResult, path: str):
     for o in res.orders:
         p, pt = o.problems, o.problem_ticks
         rows.append([o.order_id, o.rack, sec(o.release), sec(o.assign), sec(o.t_in), sec(o.t_rfid), sec(o.t_rack),
-                     sec(o.complete), sec(o.lead), sec(o.response), o.amr, o.assign_dist, sec(o.cost),
-                     sec(o.min_cost), o.best_amr, int(o.inefficient), o.extra_dist, sec(o.extra_time),
+                     sec(o.out_assign), sec(o.t_pick), sec(o.complete), sec(o.lead), sec(o.response),
+                     o.amr, o.amr_out, int(o.chained_out), o.assign_dist, o.assign_dist_out,
+                     sec(o.cost), sec(o.min_cost), o.best_amr, sec(o.cost_out), sec(o.min_cost_out), o.best_amr_out,
+                     int(o.inefficient), o.extra_dist, sec(o.extra_time),
                      int(o.manual_check), p.get("경로충돌", 0), p.get("정면충돌", 0), p.get("병목", 0),
                      sec(pt.get("병목", 0)), p.get("장시간정체", 0), sec(pt.get("장시간정체", 0)),
                      o.distance, sec(o.move), sec(o.work), sec(o.wait), o.tote_in, o.slot_in, o.tote_out, o.slot_out])
