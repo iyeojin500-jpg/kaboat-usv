@@ -440,14 +440,17 @@ class Simulation:
 
     # ------------------------------------------------------------ 충돌 → 작업자 개입 (인력 의존도)
     def on_collision(self, ep):
-        """경로/정면 충돌 1건 = 작업자 개입 1회. 해결시간 20~60초 랜덤 (seed 고정).
+        """경로/정면 충돌 1건(에피소드) = 작업자 개입 1회. 해결시간 20~60초 랜덤 (seed 고정).
 
-        작업자가 이미 그 AMR 를 처리 중이거나(정지 중), 같은 두 AMR·같은 위치 충돌을 막 해결한 직후(10초 이내)라면
-        같은 상황이 이어지는 것으로 보고 새 충돌·개입으로 세지 않는다 (해결 중인 상황을 반복 집계하지 않음)."""
+        기본(기록 모드): 모든 충돌 에피소드를 1건씩 기록만 하고 AMR 는 멈추지 않는다
+        (tools/collisions_from_events.py 의 사후 계산과 같은 규칙).
+        정지 모드(HUMAN_RESOLVE_STOPS=True): 작업자가 이미 그 AMR 를 처리 중이거나 같은 쌍·위치를 막 해결한 직후
+        (10초 이내)의 재발은 같은 상황으로 보고 새 개입으로 세지 않는다."""
         amrs = [a for a in self.amrs if a.name in ep.amrs]
         key = (tuple(sorted(ep.amrs)), ep.where)
-        if any(self.now < a.frozen_until for a in amrs) or self.now < self.resolved.get(key, -1):
-            return
+        if P.HUMAN_RESOLVE_STOPS and (any(self.now < a.frozen_until for a in amrs)
+                                      or self.now < self.resolved.get(key, -1)):
+            return      # (정지 모드) 작업자가 처리 중인 상황의 반복은 1건으로
         t = T(self.human_rng.uniform(P.HUMAN_RESOLVE_MIN, P.HUMAN_RESOLVE_MAX))
         self.collisions.append({
             "collision_id": len(self.collisions) + 1, "time": ep.start * P.TICK,

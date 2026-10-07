@@ -12,7 +12,8 @@ python run.py                            # 헤드리스: Before/After 실행 →
 python run.py --seeds 1 2 3 7            # 여러 seed 반복실험 → results/seeds_summary.csv
 python run.py --ablation                 # 레이어별 기여도 (OR-Tools만 / Cooperative A*만)
 python run.py --gap-scale 3              # 민감도: 주문 발생 간격 3배 (부하 낮춤)
-python tools/kpi_from_csv.py             # 저장된 CSV 로 KPI·인력 개입시간만 재계산 (시뮬레이션 재실행 없음)
+python tools/collisions_from_events.py   # 저장된 충돌 기록으로 충돌별 작업자 개입시간 계산 (재실행 없음)
+python tools/kpi_from_csv.py             # 저장된 CSV 로 KPI 재계산 → simulation_comparison.csv, summary.md (재실행 없음)
 python tools/make_excel.py               # results/결과정리.xlsx (기대효과KPI·결과정리·원본 데이터 시트)
 python visualize.py                      # 시각화: 두 CASE 나란히 재생 (pygame 창)
 python visualize.py --start 4000         # 피크1 직전부터
@@ -44,13 +45,15 @@ python visualize.py --start 4000         # 피크1 직전부터
 | 작업 처리시간 | 평균(출고완료 − 주문발생), 개선율 (B−A)/B | 20~30% 단축 |
 | 설비 가동률 | **실작업 가동률** = 작업시간(적재·RFID·적치·피킹·하역·WMS) / 전체시간, 상대 개선율 (A−B)/B. 빈 차 이동·대기는 가동으로 보지 않음 (기존 정의 (이동+작업)/전체시간 은 참고로 함께 출력) | 15% 이상 향상 |
 | 재고 정확도 | 일치 기록 / 전체 기록 (방해요소 반영 후 평가) | 98% 이상 |
-| 인력 의존도 | **AMR 충돌 해결 작업자 개입시간** 감소율 (B−A)/B. 충돌(경로·정면) 1건 = 작업자 개입 1회, 해결시간 20~60초 균등 랜덤(seed 고정). 해결 동안 관련 AMR 정지 → 해결 → 동시에 재개 (정면 충돌은 한쪽을 비켜 세움). 작업자가 이미 처리 중이거나 같은 쌍·위치를 막 해결한 직후(10초)의 재발은 같은 상황으로 1건. 개입 횟수는 보조지표 | 10~15% 감소 |
+| 인력 의존도 | **AMR 충돌 해결 작업자 개입시간** 감소율 (B−A)/B. 충돌(경로·정면) 에피소드 1건 = 작업자 개입 1회, 해결시간 20~60초 균등 랜덤(seed 고정). 개입시간은 **기록만** 하고 처리시간에는 정지 효과를 섞지 않음. 개입 횟수는 보조지표 | 10~15% 감소 |
 | 주문 대응시간 | 평균(작업시작 − 주문발생), 개선율 (B−A)/B | 25% 이상 개선 |
 
 판정: 목표 범위 안 = 달성, 상한 초과 = 초과 달성, 하한 미만 = 미달 (결과에 맞춰 조정하지 않음).
 충돌 이벤트별 기록은 `case*_collisions.csv` (collision_id, time, amr_1, amr_2, collision_type, location,
 human_intervention_time), Before/After 비교는 `simulation_comparison.csv`.
-`amr_sim/params.py` 의 `HUMAN_RESOLVE_STOPS = False` 로 바꾸면 AMR 를 멈추지 않고 개입시간만 기록한다.
+현재 `results/` 는 정지 없는 run 의 결과이고, 충돌 해결 개입시간은 그 run 의 충돌 기록(`case*_events.csv`)으로
+`python tools/collisions_from_events.py` 가 사후 계산한 값이다 (재실행 없음).
+참고로 충돌마다 AMR 를 실제로 멈춘 변형 결과는 `results_stop_variant/` 에 있다 (`HUMAN_RESOLVE_STOPS = True`).
 
 ### 기타
 - 예상 수행비용 = (AMR 가 현재 주문을 끝낼 때까지 남은 시간) + (입고장까지 공차 이동) + (주문 처리 예상시간), 자유주행 기준
